@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>make.fun bounty board</title>
+    <meta name="description" content="Open bounties on make.fun: each one's rewards, entry fee, deadline and entries, read from make.fun's public API." />
+    <meta name="color-scheme" content="dark" />
+    <link rel="stylesheet" href="style.css" />
+    <script type="module" src="main.js"></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="top">
+      <div class="top-in">
+        <a class="brand" href="#/" aria-label="make.fun board, back to the bounty board">
+          <span class="brand-mark" aria-hidden="true">◆</span>
+          <span class="brand-text">make<span class="brand-dot">.</span>fun</span>
+          <span class="brand-tag">board</span>
+        </a>
+        <nav class="top-nav" aria-label="Sections">
+          <a href="#/" data-nav="board">Board</a>
+          <a href="https://make.fun/bounties" rel="noopener">make.fun ↗</a>
+        </nav>
+        <div class="top-side">
+          <span id="net" class="net" aria-live="polite">live data</span>
+          <button id="refresh" class="btn btn-ghost" type="button">Refresh</button>
+        </div>
+      </div>
+    </header>
+
+    <main id="main" tabindex="-1"></main>
+
+    <footer class="foot">
+      <p>Read-only: every figure is a GET of make.fun's public API, cached and revalidated with its ETag.</p>
+      <p id="foot-note" class="foot-note">Times are UTC. Deadlines, not status tags, decide what still takes entries.</p>
+    </footer>
+
+    <noscript>
+      <p class="noscript">This board is a small JavaScript app: it needs scripting on to read make.fun's API.</p>
+    </noscript>
+  </body>
+</html>
