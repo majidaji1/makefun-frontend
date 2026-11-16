@@ -1,119 +1,147 @@
-// Every read this app makes: GET https://make.fun/api/..., kept in memory and revalidated with the API's ETag.
+// Read-only access to the public make.fun API.
 //
-// The API's tags are bound to the minute: `If-None-Match` inside the same minute answers 304, and after the
-// minute turns it answers 200 with a new tag even when nothing changed. So a second look at a route costs one
-// conditional request and no body, and a view left and re-entered inside the TTL costs no request at all.
+// Every answer is kept twice: in memory for the life of the tab, and (when the
+// caller allows it) in localStorage so a reload paints the last data at once.
+// Network answers are always revalidated with If-None-Match, because the API
+// ties its ETag to the current minute — a repeat view usually costs a 304.
 
-const BASE = 'https://make.fun/api';
+const ORIGIN = "https://make.fun";
+const API = ORIGIN + "/api";
+const PREFIX = "mfboard:";
+const FRESH_MS = 20000;
+const TIMEOUT_MS = 12000;
 
-/** url -> { etag, data, at }: the last answer for a URL, and when it arrived. */
-const cache = new Map();
-
-/** url -> Promise: one request per URL, however many views ask for it at once. */
+const memory = new Map();
 const inflight = new Map();
 
-const listeners = new Set();
-const stats = { requests: 0, revalidated: 0, hits: 0, lastAt: 0 };
-
-export class ApiError extends Error {
-  constructor(status, url, body) {
-    super(`GET ${url} answered ${status}${body ? `: ${body}` : ''}`);
-    this.name = 'ApiError';
-    this.status = status;
-    this.url = url;
-    this.body = body;
+export function apiURL(path, query) {
+  const url = new URL(API + path);
+  if (query) {
+    for (const [key, value] of Object.entries(query)) {
+      if (value === undefined || value === null || value === "") continue;
+      url.searchParams.set(key, String(value));
+    }
   }
+  return url.href;
 }
 
-/** The absolute URL of an API path, or the path itself when it is already one. */
-export function apiUrl(path) {
-  return path.startsWith('http') ? path : BASE + path;
+export function assetURL(path) {
+  if (!path) return null;
+  if (/^https?:\/\//i.test(path)) return path;
+  if (path.startsWith("/")) return ORIGIN + path;
+  return null;
 }
 
-/** What this session has asked the API for: shown in the header so the revalidation is visible. */
-export function netStats() {
-  return { ...stats };
-}
-
-/** Called after every answer with the event and the running totals. */
-export function onNet(fn) {
-  listeners.add(fn);
-  return () => listeners.delete(fn);
-}
-
-function announce(kind) {
-  const snapshot = { kind, ...stats };
-  for (const fn of listeners) fn(snapshot);
-}
-
-async function bodyOf(response) {
+function readDisk(key) {
   try {
-    const text = await response.text();
-    return text.slice(0, 240);
+    const raw = localStorage.getItem(PREFIX + key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
   } catch {
-    return '';
+    return null;
   }
 }
 
-/**
- * A GET of one API path. Serves the memory copy while it is younger than `ttl`, revalidates with `If-None-Match`
- * after that, and dedupes concurrent callers into one request. `fresh: true` skips both and asks again.
- */
-export async function api(path, options = {}) {
-  const url = apiUrl(path);
-  const ttl = options.ttl ?? 20000;
-  const fresh = options.fresh === true;
-  const known = cache.get(url);
+function writeDisk(key, record) {
+  try {
+    localStorage.setItem(PREFIX + key, JSON.stringify(record));
+  } catch {
+    try { localStorage.removeItem(PREFIX + key); } catch { /* storage is unavailable */ }
+  }
+}
 
-  if (!fresh && known !== undefined && Date.now() - known.at < ttl) {
-    stats.hits += 1;
-    announce('memory');
-    return known.data;
+// A view paints whatever this returns straight away, then asks for the network
+// answer and only re-renders when the ETag moved.
+export function peek(key) {
+  const warm = memory.get(key);
+  if (warm) return { data: warm.data, etag: warm.etag, at: warm.at, warm: true };
+  const disk = readDisk(key);
+  if (!disk || disk.data === undefined) return null;
+  memory.set(key, { data: disk.data, etag: disk.etag || null, at: disk.at || 0 });
+  return { data: disk.data, etag: disk.etag || null, at: disk.at || 0, warm: false };
+}
+
+export function drop(key) {
+  memory.delete(key);
+  try { localStorage.removeItem(PREFIX + key); } catch { /* nothing to drop */ }
+}
+
+function remember(key, data, etag, persist) {
+  const record = { data, etag: etag || null, at: Date.now() };
+  memory.set(key, record);
+  if (persist) writeDisk(key, record);
+  return record;
+}
+
+export async function getJSON(url, options = {}) {
+  const key = options.key || url;
+  const persist = options.persist === true;
+  const warm = memory.get(key);
+  const hit = warm || peek(key);
+
+  if (!options.force && hit && Date.now() - (hit.at || 0) < (options.freshMs ?? FRESH_MS)) {
+    return { data: hit.data, etag: hit.etag, source: "memory", changed: false };
   }
 
   const running = inflight.get(url);
-  if (running !== undefined) return running;
+  if (running) return running;
 
-  const request = (async () => {
-    const headers = {};
-    if (known !== undefined && !fresh) headers['If-None-Match'] = known.etag;
+  const task = (async () => {
+    const headers = { accept: "application/json" };
+    if (hit && hit.etag) headers["if-none-match"] = hit.etag;
 
-    stats.requests += 1;
-    stats.lastAt = Date.now();
-    const response = await fetch(url, { headers, signal: options.signal });
-
-    if (response.status === 304 && known !== undefined) {
-      stats.revalidated += 1;
-      cache.set(url, { etag: known.etag, data: known.data, at: Date.now() });
-      announce('revalidated');
-      return known.data;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? TIMEOUT_MS);
+    let response;
+    try {
+      response = await fetch(url, {
+        headers,
+        signal: controller.signal,
+        mode: "cors",
+        credentials: "omit",
+        cache: "no-cache",
+        redirect: "follow",
+      });
+    } finally {
+      clearTimeout(timer);
     }
 
-    if (!response.ok) throw new ApiError(response.status, url, await bodyOf(response));
+    if (response.status === 304 && hit) {
+      remember(key, hit.data, hit.etag, persist);
+      return { data: hit.data, etag: hit.etag, source: "revalidated", changed: false };
+    }
 
+    if (!response.ok) {
+      const error = new Error(
+        response.status === 404 ? "not found" : "make.fun answered " + response.status
+      );
+      error.status = response.status;
+      throw error;
+    }
+
+    const etag = response.headers.get("etag");
     const data = await response.json();
-    cache.set(url, { etag: response.headers.get('etag') ?? '', data, at: Date.now() });
-    announce(known === undefined ? 'fetch' : 'refetch');
-    return data;
+    const changed = !hit || !etag || !hit.etag || etag !== hit.etag;
+    remember(key, data, etag, persist);
+    return { data, etag: etag || null, source: "network", changed };
   })();
 
-  inflight.set(url, request);
+  inflight.set(url, task);
   try {
-    return await request;
+    return await task;
   } finally {
-    if (inflight.get(url) === request) inflight.delete(url);
+    inflight.delete(url);
   }
 }
 
-/** Loads a module once per session and hands back its default export, so a route never re-downloads its code. */
-const modules = new Map();
-
-export function module_(loader) {
-  const key = loader;
-  let loaded = modules.get(key);
-  if (loaded === undefined) {
-    loaded = loader().then((mod) => mod.default);
-    modules.set(key, loaded);
-  }
-  return loaded;
+export function ageLabel(at) {
+  if (!at) return "just now";
+  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (seconds < 5) return "just now";
+  if (seconds < 60) return seconds + "s ago";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return minutes + "m ago";
+  return Math.round(minutes / 60) + "h ago";
 }

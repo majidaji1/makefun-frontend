@@ -1,2 +1,2 @@
-# The output directory of `node main.ts` is built from app/ and screenshots/, never committed.
 out/
+node_modules/

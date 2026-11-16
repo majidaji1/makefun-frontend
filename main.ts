@@ -1,88 +1,110 @@
-// Entry point of this entry: it hands the app in.
+// Entry point of the make.fun frontend entry.
 //
-// `node main.ts` copies app/ and screenshots/ from this repository into the output directory
-// (MAKEFUN_OUTPUT_DIR when it is set, /output otherwise) and writes the dossier the gate rebuilds with
-// the kit's own library, so both runs of the program write the same bytes.
-//
-// Node 22, the standard library alone, no install step: TypeScript here is erased, not compiled.
+// It is deliberately small: Node's standard library copies the static app and
+// the screenshots into the output directory, then the entry kit's own
+// buildDossier() writes dossier.json beside them. Two runs of this file write
+// the same bytes, so the entry stays reproducible.
 
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { cp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import { buildDossier } from "./vendor/makefun-frontend.ts";
 
-import { buildDossier } from './vendor/makefun-frontend.ts';
+const HERE = dirname(fileURLToPath(import.meta.url));
+const OUTPUT = resolve(process.env.MAKEFUN_OUTPUT_DIR || "/output");
+const APP = join(HERE, "app");
+const SCREENSHOTS = join(HERE, "screenshots");
+const STATIC_PIECES = [
+  { from: APP, to: join(OUTPUT, "app"), required: true },
+  { from: SCREENSHOTS, to: join(OUTPUT, "screenshots"), required: false },
+];
 
-/** The repository this file sits in: app/, screenshots/ and vendor/ are read from it. */
-const repoRoot = dirname(fileURLToPath(import.meta.url));
-
-/** Where the entry is handed in: the grader's MAKEFUN_OUTPUT_DIR, else /output. */
-const outDir = resolve(process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
-
-/** The caps this bounty's gate gives buildDossier, word for word as the brief states them. */
-const DOSSIER_OPTS = {
+const DOSSIER_OPTIONS = {
   text_max_bytes: 163840,
   screenshots: { max: 3, max_bytes: 262144 },
   app_max_files: 993,
   app_max_bytes: 16777216,
-} as const;
+};
 
-/** Copies one directory of the repository into the output directory, byte for byte, and reports what it held. */
-function handIn(name: string): { path: string; files: number; bytes: number } | null {
-  const from = join(repoRoot, name);
-  const to = join(outDir, name);
-  if (!existsSync(from)) return null;
-  if (!statSync(from).isDirectory()) throw new Error(`main.ts: ${name} is not a directory`);
+async function exists(path) {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-  // A stale copy of an earlier run must never survive into this one: two runs write the same bytes.
-  rmSync(to, { recursive: true, force: true });
-  cpSync(from, to, { recursive: true, force: true });
-
+async function measure(dir) {
   let files = 0;
   let bytes = 0;
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) walk(path);
-      else {
-        files += 1;
-        bytes += statSync(path).size;
-      }
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const inner = await measure(path);
+      files += inner.files;
+      bytes += inner.bytes;
+    } else if (entry.isFile()) {
+      files += 1;
+      bytes += (await stat(path)).size;
     }
-  };
-  walk(to);
-  return { path: to, files, bytes };
+  }
+  return { files, bytes };
 }
 
-/** Whether a handed-in screenshots/ holds at least one image file: the library refuses a directory that holds none. */
-function holdsImage(dir: string): boolean {
-  return readdirSync(dir, { withFileTypes: true }).some((entry) => entry.isFile() && !entry.name.startsWith('.'));
+async function place(piece) {
+  if (!(await exists(piece.from))) {
+    if (piece.required) throw new Error(`missing source directory: ${piece.from}`);
+    return { skipped: true, files: 0, bytes: 0 };
+  }
+  await rm(piece.to, { recursive: true, force: true });
+  await mkdir(dirname(piece.to), { recursive: true });
+  await cp(piece.from, piece.to, { recursive: true, force: true, preserveTimestamps: true });
+  return { skipped: false, ...(await measure(piece.to)) };
 }
 
-function main(): void {
-  mkdirSync(outDir, { recursive: true });
+async function main() {
+  await mkdir(OUTPUT, { recursive: true });
 
-  const app = handIn('app');
-  if (app === null) throw new Error('main.ts: app/: no such directory: the entry is a static app/ with index.html at its root');
-  if (!existsSync(join(outDir, 'app', 'index.html'))) throw new Error('main.ts: app/index.html: no such file');
-
-  const shots = handIn('screenshots');
-  const shotsDir = join(outDir, 'screenshots');
-  const shotsReady = shots !== null && holdsImage(shotsDir);
-
-  const lines: string[] = [`app/     ${app.files} files, ${app.bytes} bytes -> ${app.path}`];
-  if (shots !== null) lines.push(`shots    ${shots.files} files, ${shots.bytes} bytes -> ${shots.path}`);
-
-  if (shotsReady) {
-    const dossier = buildDossier(outDir, DOSSIER_OPTS);
-    writeFileSync(join(outDir, 'dossier.json'), dossier);
-    lines.push(`dossier  ${dossier.length} bytes -> ${join(outDir, 'dossier.json')}`);
-  } else {
-    // Screenshots are taken when the app is done; a run before that hands in main.ts and app/ alone.
-    lines.push('dossier  skipped: screenshots/ holds no image yet, and buildDossier refuses a directory that holds none');
+  const placed = [];
+  for (const piece of STATIC_PIECES) {
+    const result = await place(piece);
+    placed.push({ to: piece.to, ...result });
   }
 
-  lines.push(`output   ${outDir}`);
-  process.stdout.write(`${lines.join('\n')}\n`);
+  const entryPage = join(OUTPUT, "app", "index.html");
+  if (!(await exists(entryPage))) {
+    throw new Error(`the output has no app/index.html at ${entryPage}`);
+  }
+
+  // buildDossier() hands back the dossier as the exact bytes it wants written
+  // (a Uint8Array of JSON); a plain string or object is written as such.
+  const dossier = await buildDossier(OUTPUT, DOSSIER_OPTIONS);
+  const dossierPath = join(OUTPUT, "dossier.json");
+  if (typeof dossier === "string") {
+    await writeFile(dossierPath, dossier, "utf8");
+  } else if (dossier instanceof Uint8Array) {
+    await writeFile(dossierPath, dossier);
+  } else if (dossier !== undefined && dossier !== null) {
+    await writeFile(dossierPath, JSON.stringify(dossier), "utf8");
+  } else if (!(await exists(dossierPath))) {
+    throw new Error("buildDossier() returned nothing and wrote no dossier.json");
+  }
+
+  const lines = [`output: ${OUTPUT}`];
+  for (const item of placed) {
+    const label = item.to.slice(OUTPUT.length + 1).split(sep).join("/");
+    lines.push(
+      item.skipped
+        ? `  ${label}: not present, skipped`
+        : `  ${label}: ${item.files} files, ${item.bytes} bytes`
+    );
+  }
+  const dossierSize = (await stat(dossierPath)).size;
+  const appSize = await measure(join(OUTPUT, "app"));
+  lines.push(`  dossier.json: ${dossierSize} bytes`);
+  lines.push(`app budget: ${appSize.files}/${DOSSIER_OPTIONS.app_max_files} files, ${appSize.bytes}/${DOSSIER_OPTIONS.app_max_bytes} bytes`);
+  process.stdout.write(lines.join("\n") + "\n");
 }
 
-main();
+await main();

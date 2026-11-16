@@ -1,242 +1,342 @@
-// The board: every bounty make.fun calls open, with its pot, its entry fee, its deadline and its entries.
-//
-// A bounty past its deadline can still read `status: "open"` until its results are published, so what still takes
-// entries is decided here from the deadline alone. The list is paged with the API's cursor and never rebuilt whole:
-// filters and sorts repaint the list only, and the countdowns are painted by the page's one clock.
+// The board: every competition make.fun lists, with what a reader needs to
+// judge it at a glance — prize, pot, entry fee, time left, entries.
 
-import { api } from '../lib/net.js';
-import { ago, count, dayUtc, deadline as deadlineOf, plain, stampUtc, usd, when } from '../lib/format.js';
-import { el, fact, pill, skeletonCards, stat, statDeadline } from '../lib/ui.js';
+import { apiURL, getJSON, peek, ageLabel } from "../lib/net.js";
+import {
+  el, frag, fill, clear, everySecond, pill, statTerm, errorPanel, skeletons, setText,
+} from "../lib/dom.js";
+import { money, num, compact, remaining, stamp, clip, plural } from "../lib/format.js";
 
-/** What the board remembers between visits, so coming back does not start over. */
-const view = {
-  items: [],
-  cursor: null,
-  loading: false,
-  filter: 'all',
-  sort: 'closing',
-  fetchedAt: 0,
-};
+const KEY = "board";
 
-const FILTERS = [
-  ['all', 'All'],
-  ['open', 'Taking entries'],
-  ['closed', 'Entries closed'],
-];
+export default async function board(root, ctx) {
+  const state = { items: [], cursor: null, more: false, loading: false, force: ctx.force };
 
-const SORTS = [
-  ['closing', 'Closing soon'],
-  ['pot', 'Biggest pot'],
-  ['entries', 'Most entries'],
-  ['new', 'Newest'],
-];
+  const search = el("input", {
+    type: "search",
+    placeholder: "Filter by title, sponsor, skill, category…",
+    "aria-label": "Filter the board",
+    autocomplete: "off",
+  });
 
-const stillOpen = (item) => {
-  const at = when(item.deadline);
-  return at !== null && at > Date.now();
-};
-
-const potOf = (item) => Number.parseFloat(String(item.potUsd ?? item.rewardAmount ?? '0')) || 0;
-
-function sorted(items) {
-  const rows = items.slice();
-  if (view.filter === 'open') return rows.filter(stillOpen).sort((a, b) => when(a.deadline) - when(b.deadline));
-  if (view.filter === 'closed') return rows.filter((item) => !stillOpen(item)).sort((a, b) => when(b.deadline) - when(a.deadline));
-  switch (view.sort) {
-    case 'pot':
-      return rows.sort((a, b) => potOf(b) - potOf(a));
-    case 'entries':
-      return rows.sort((a, b) => (b.submissionCount ?? 0) - (a.submissionCount ?? 0));
-    case 'new':
-      return rows.sort((a, b) => (when(b.publishedAt) ?? 0) - (when(a.publishedAt) ?? 0));
-    default:
-      // Closing soon first, and what is already closed after everything that still takes entries.
-      return rows.sort((a, b) => {
-        const openA = stillOpen(a);
-        const openB = stillOpen(b);
-        if (openA !== openB) return openA ? -1 : 1;
-        return openA ? when(a.deadline) - when(b.deadline) : when(b.deadline) - when(a.deadline);
-      });
-  }
-}
-
-/** One bounty as a card. */
-function card(item) {
-  const open = stillOpen(item);
-  const ends = deadlineOf(item.deadline);
-  const first = usd(item.rewards?.['1'] ?? item.rewardAmount, { free: 'n/a' });
-
-  const top = el(
-    'div',
-    { class: 'card-top' },
-    el('span', { class: 'mono', text: item.sponsor?.name ?? 'make.fun' }),
-    item.sponsor?.isVerified ? el('span', { class: 'verified', text: '✓', title: 'Verified sponsor' }) : null,
-    item.category ? pill(item.category) : null,
-    el('span', { class: 'spacer' }),
-    pill(open ? 'Taking entries' : 'Entries closed', open ? (ends.tone === 'soon' ? 'soon' : 'open') : 'shut', open ? ends.left : `closed ${ago(item.deadline)}`),
+  const sort = el(
+    "select",
+    { "aria-label": "Sort the board" },
+    el("option", { value: "closing", text: "Closing soonest" }),
+    el("option", { value: "pot", text: "Biggest pot" }),
+    el("option", { value: "entries", text: "Most entries" }),
+    el("option", { value: "reward", text: "Biggest listed prize" }),
+    el("option", { value: "newest", text: "Newest first" })
   );
 
-  const facts = el(
-    'div',
-    { class: 'card-facts' },
-    fact('Pot now', usd(item.potUsd, { cents: true, free: '—' }), { tone: 'money', title: `${usd(item.rewardAmount)} in base rewards` }),
-    fact('1st place', first, { tone: 'money' }),
-    fact('Entry fee', item.entryFeeUsd === null || item.entryFeeUsd === undefined ? 'free' : usd(item.entryFeeUsd), { tone: 'fee', title: item.entryFeeUsd ? 'Paid by every entrant' : 'No entry fee' }),
-    fact('Entries', count(item.submissionCount), { title: `${item.submissionCount ?? 0} submissions so far` }),
-    fact(open ? 'Time left' : 'Closed', '', { tone: `time ${ends.tone}`, deadline: item.deadline }),
-    fact('Deadline', dayUtc(item.deadline), { title: stampUtc(item.deadline) }),
-  );
+  const tabOpen = el("button", { type: "button", text: "Open", "aria-pressed": "true" });
+  const tabEnded = el("button", { type: "button", text: "Closed", "aria-pressed": "false" });
+  const tabAll = el("button", { type: "button", text: "All", "aria-pressed": "false" });
+  const tabs = el("div", { class: "tabs", role: "group", "aria-label": "Which bounties" }, tabOpen, tabEnded, tabAll);
 
-  return el(
-    'article',
-    { class: `card ${open ? '' : 'ended'}` },
-    top,
-    el('h3', { class: 'card-title' }, el('a', { href: `#/bounty/${item.slug}`, text: item.title })),
-    el('p', { class: 'card-note', text: plain(item.description, 165) }),
-    facts,
+  const refresh = el("button", {
+    class: "btn",
+    type: "button",
+    text: "Refresh",
+    title: "Revalidate the board with make.fun",
+    on: { click: () => ctx.reload() },
+  });
+
+  const stats = el("div", { class: "stats" });
+  const count = el("p", { class: "note", "aria-live": "polite" });
+  const grid = el("div", { class: "grid" });
+  const more = el("button", { class: "btn", type: "button", text: "Load more bounties" });
+  const updated = el("span", { class: "note" });
+
+  fill(
+    root,
     el(
-      'div',
-      { class: 'card-foot' },
-      item.harnessKind ? el('span', { class: 'mono', text: item.harnessKind }) : null,
-      el('span', { class: 'spacer' }),
-      el('a', { href: `#/bounty/${item.slug}`, text: 'Bounty page' }),
-      el('a', { href: `#/bounty/${item.slug}/leaderboard`, text: 'Leaderboard' }),
+      "div",
+      { class: "head" },
+      el("h1", { text: "Open bounties" }),
+      el(
+        "p",
+        { class: "sub" },
+        "Live from the public make.fun API. A bounty is open while its deadline is ahead — ",
+        "the status field alone does not say so."
+      )
     ),
+    el("div", { class: "toolbar" }, search, sort, tabs, refresh),
+    stats,
+    count,
+    grid,
+    el("div", { class: "head" }, more, updated)
   );
+
+  let mode = "open";
+  let query = "";
+  let order = "closing";
+
+  ctx.title("Board");
+  ctx.crumbs([{ label: "Board" }]);
+  skeletons(grid, "cards");
+
+  const unsub = everySecond(() => {
+    const now = Date.now();
+    for (const node of grid.querySelectorAll("[data-deadline]")) {
+      const info = remaining(node.dataset.deadline, now);
+      setText(node, info.text);
+      node.className = "pill " + info.tone;
+    }
+    setText(updated, "updated " + ageLabel(lastLoad));
+  });
+
+  let lastLoad = 0;
+
+  function visible() {
+    const now = Date.now();
+    const needle = query.trim().toLowerCase();
+    return state.items
+      .filter((item) => {
+        const open = Date.parse(item.deadline) > now;
+        if (mode === "open" && !open) return false;
+        if (mode === "ended" && open) return false;
+        if (!needle) return true;
+        return (
+          item.title.toLowerCase().includes(needle) ||
+          (item.sponsorName || "").toLowerCase().includes(needle) ||
+          (item.category || "").toLowerCase().includes(needle) ||
+          item.skills.join(" ").toLowerCase().includes(needle) ||
+          item.blurb.toLowerCase().includes(needle)
+        );
+      })
+      .sort(comparators(order, now));
+  }
+
+  function drawStats() {
+    const list = visible();
+    const pot = list.reduce((sum, item) => sum + (Number(item.potUsd) || 0), 0);
+    const entries = list.reduce((sum, item) => sum + (Number(item.submissionCount) || 0), 0);
+    const soon = list.filter((item) => {
+      const left = Date.parse(item.deadline) - Date.now();
+      return left > 0 && left < 86400000;
+    }).length;
+    const free = list.filter((item) => !item.entryFeeUsd).length;
+
+    fill(
+      stats,
+      statTerm("Shown", num(list.length), plural(list.length, "bounty", "bounties")),
+      statTerm("Pot", money(pot)),
+      statTerm("Entries in", compact(entries)),
+      statTerm("Closing <24h", num(soon)),
+      statTerm("Free entry", num(free))
+    );
+    setText(
+      count,
+      list.length === state.items.length
+        ? `${num(list.length)} bounties on the board.`
+        : `${num(list.length)} of ${num(state.items.length)} bounties match.`
+    );
+  }
+
+  function card(item, now) {
+    const left = remaining(item.deadline, now);
+    const open = left.open;
+    const fee = Number(item.entryFeeUsd) || 0;
+    const pot = Number(item.potUsd) || 0;
+    const reward = Number(item.rewardAmount) || 0;
+    const showPot = pot > 0 && pot !== reward;
+
+    const top = el(
+      "div",
+      { class: "top-row" },
+      el(
+        "span",
+        { class: "sponsor" },
+        item.sponsorName || "unsponsored",
+        item.sponsorVerified ? el("span", { class: "pill ok", text: "✓", title: "verified sponsor" }) : null
+      ),
+      el("span", { "aria-hidden": "true" }, "·"),
+      el("span", { text: item.category || "uncategorised" }),
+      el("span", { class: "spacer" }),
+      el("span", { class: "pill " + left.tone, "data-deadline": item.deadline, title: stamp(item.deadline) }, left.text)
+    );
+
+    const prices = el(
+      "div",
+      { class: "prices" },
+      el("span", { class: "price", text: money(reward) }),
+      el("span", { class: "note", text: "listed prize" })
+    );
+    if (showPot) {
+      prices.appendChild(el("span", { class: "price pot", text: money(pot) }));
+      prices.appendChild(el("span", { class: "note", text: "pot" }));
+    }
+    prices.appendChild(
+      fee > 0
+        ? pill(money(fee) + " entry", "warm", "cost to enter")
+        : pill("free entry", "ok", "no entry fee")
+    );
+
+    const facts = el(
+      "div",
+      { class: "facts" },
+      pill(compact(item.submissionCount) + " " + plural(Number(item.submissionCount), "entry", "entries"), "cool"),
+      pill(item.harnessKind || "harness", "quiet"),
+      el("span", { class: "spacer" })
+    );
+    for (const skill of item.skills.slice(0, 2)) facts.appendChild(pill(skill, "quiet"));
+
+    const foot = el(
+      "p",
+      { class: "note" },
+      "Closes ",
+      el("time", { datetime: item.deadline, text: stamp(item.deadline) }),
+      open ? "" : " · closed"
+    );
+
+    return el(
+      "article",
+      { class: "card bcard" + (open ? "" : " ended") },
+      top,
+      el("h3", { class: "title" }, el("a", { href: "#/bounty/" + item.slug, text: item.title })),
+      el("p", { class: "desc", text: item.blurb }),
+      prices,
+      facts,
+      foot,
+      el(
+        "div",
+        { class: "facts" },
+        el("a", { class: "btn", href: "#/bounty/" + item.slug, text: "Bounty" }),
+        el("a", { class: "btn", href: "#/bounty/" + item.slug + "/leaderboard", text: "Leaderboard" }),
+        el("span", { class: "spacer" }),
+        el("a", { class: "btn", href: "https://make.fun/bounty/" + item.slug, rel: "noopener noreferrer", target: "_blank", text: "make.fun ↗" })
+      )
+    );
+  }
+
+  function draw() {
+    const list = visible();
+    const now = Date.now();
+    if (!list.length) {
+      fill(grid, el("p", { class: "note", text: "Nothing matches that filter. Clear the search or switch tab." }));
+    } else {
+      fill(grid, list.map((item) => card(item, now)));
+    }
+    drawStats();
+    more.hidden = !state.more;
+    more.disabled = state.loading;
+    setText(updated, lastLoad ? "updated " + ageLabel(lastLoad) : "waiting for make.fun");
+  }
+
+  function accept(payload, page) {
+    const rows = (payload.items || []).map(project);
+    if (page === 0) state.items = rows;
+    else state.items = state.items.concat(rows.filter((row) => !state.items.some((seen) => seen.slug === row.slug)));
+    state.cursor = payload.next_cursor || null;
+    state.more = Boolean(state.cursor);
+  }
+
+  async function load(page, force) {
+    state.loading = true;
+    more.disabled = true;
+    const cursor = page === 0 ? null : state.cursor;
+    const url = apiURL("/competitions", { status: "open", limit: 60, cursor });
+    const key = cursor ? "board:" + cursor : KEY;
+    try {
+      const answer = await getJSON(url, { key, persist: !cursor, force });
+      accept(answer.data, page);
+      lastLoad = Date.now();
+      draw();
+      announce();
+    } catch (error) {
+      if (!state.items.length) {
+        fill(grid, errorPanel(error, () => ctx.reload()));
+        setText(updated, "make.fun unreachable");
+      } else {
+        setText(updated, "kept the last answer: " + (error.message || "request failed"));
+      }
+    } finally {
+      state.loading = false;
+      more.disabled = false;
+      ctx.ready();
+    }
+  }
+
+  function announce() {
+    const now = Date.now();
+    const open = state.items.filter((item) => Date.parse(item.deadline) > now).length;
+    const pot = state.items
+      .filter((item) => Date.parse(item.deadline) > now)
+      .reduce((sum, item) => sum + (Number(item.potUsd) || 0), 0);
+    ctx.live(`${num(open)} open · ${money(pot)} in pots · updated ${ageLabel(lastLoad)}`);
+  }
+
+  search.addEventListener("input", () => {
+    query = search.value;
+    draw();
+  });
+  sort.addEventListener("change", () => {
+    order = sort.value;
+    draw();
+  });
+  const setTab = (next) => {
+    mode = next;
+    tabOpen.setAttribute("aria-pressed", String(next === "open"));
+    tabEnded.setAttribute("aria-pressed", String(next === "ended"));
+    tabAll.setAttribute("aria-pressed", String(next === "all"));
+    draw();
+  };
+  tabOpen.addEventListener("click", () => setTab("open"));
+  tabEnded.addEventListener("click", () => setTab("ended"));
+  tabAll.addEventListener("click", () => setTab("all"));
+  more.addEventListener("click", () => load(1, false));
+
+  const cached = peek(KEY);
+  if (cached && cached.data && cached.data.items) {
+    accept(cached.data, 0);
+    lastLoad = cached.at;
+    draw();
+    announce();
+    ctx.ready();
+  }
+
+  await load(0, state.force);
+
+  return {
+    destroy() {
+      unsub();
+      clear(grid);
+    },
+  };
 }
 
-export default async function render(ctx) {
-  ctx.setTitle('Open bounties · make.fun board');
-
-  const root = el('div', { class: 'wrap' });
-  const head = el('div', { class: 'page-head' });
-  const title = el('div', { class: 'head-main' }, el('h1', { text: 'Open bounties on make.fun' }));
-  title.append(
-    el('p', {
-      class: 'lede',
-      text: 'Bounties for AI agents: each pays a pot in USDC on Solana for the best entry. What still takes entries is read from each deadline, never from the status tag alone.',
-    }),
-  );
-  const summary = el('div', { class: 'head-side' });
-  head.append(title, summary);
-  root.append(head);
-
-  const filters = el('div', { class: 'chip-row', attrs: { role: 'group', 'aria-label': 'Filter bounties' } });
-  const sorts = el('div', { class: 'chip-row', attrs: { role: 'group', 'aria-label': 'Sort bounties' } });
-  const cards = el('div', { class: 'cards' });
-  const foot = el('div', { class: 'lb-foot' });
-  root.append(filters, sorts, el('div', {}, cards, el('div', { style: 'margin-top:14px' }, foot)));
-  ctx.mount.append(root);
-
-  cards.append(skeletonCards(6));
-
-  /** Paints the toolbar, the summary figures and the cards from what is loaded, in place. */
-  const paint = () => {
-    const rows = sorted(view.items);
-    const openRows = view.items.filter(stillOpen);
-    const pots = view.items.reduce((sum, item) => sum + potOf(item), 0);
-
-    [filters, sorts].forEach((row) => {
-      while (row.firstChild) row.removeChild(row.firstChild);
-    });
-    for (const [key, label] of FILTERS) {
-      const on = view.filter === key;
-      filters.append(
-        el('button', {
-          class: 'chip',
-          type: 'button',
-          text: label,
-          attrs: { 'aria-pressed': String(on) },
-          on: {
-            click: () => {
-              view.filter = key;
-              if (key !== 'all') view.sort = 'closing';
-              paint();
-            },
-          },
-        }),
-      );
-    }
-    for (const [key, label] of SORTS) {
-      if (view.filter !== 'all') break;
-      const on = view.sort === key;
-      sorts.append(
-        el('button', {
-          class: 'chip',
-          type: 'button',
-          text: label,
-          attrs: { 'aria-pressed': String(on) },
-          on: {
-            click: () => {
-              view.sort = key;
-              paint();
-            },
-          },
-        }),
-      );
-    }
-
-    while (summary.firstChild) summary.removeChild(summary.firstChild);
-    const soonest = openRows.slice().sort((a, b) => when(a.deadline) - when(b.deadline))[0];
-    const stats = el('div', { class: 'stats' });
-    stats.append(stat('Taking entries', String(openRows.length), `of ${view.items.length} loaded`));
-    stats.append(stat('Pots loaded', usd(pots, { cents: true }), 'USDC on Solana', 'money'));
-    if (soonest !== undefined) {
-      stats.append(statDeadline('Next to close', soonest.deadline, plain(soonest.title, 34)));
-    }
-    summary.append(stats);
-
-    while (cards.firstChild) cards.removeChild(cards.firstChild);
-    if (rows.length === 0) {
-      cards.append(el('p', { class: 'muted', text: 'Nothing matches this filter among the bounties loaded so far.' }));
-    } else {
-      for (const item of rows) cards.append(card(item));
-    }
-
-    while (foot.firstChild) foot.removeChild(foot.firstChild);
-    foot.append(
-      el('span', { text: `${rows.length} shown · ${view.items.length} loaded${view.cursor === null ? '' : ' · more to load'}` }),
-    );
-    if (view.fetchedAt > 0) foot.append(el('span', { text: `read ${ago(new Date(view.fetchedAt).toISOString())}` }));
-    if (view.cursor !== null) {
-      const more = el('button', {
-        class: 'btn',
-        type: 'button',
-        text: view.loading ? 'Loading…' : 'Load more bounties',
-        on: { click: () => void load('more') },
-      });
-      more.disabled = view.loading;
-      foot.append(more);
-    } else if (view.items.length > 0) {
-      foot.append(el('span', { text: 'every open bounty is loaded' }));
-    }
+function project(item) {
+  return {
+    slug: item.slug,
+    title: item.title || item.slug,
+    category: item.category || "",
+    deadline: item.deadline,
+    publishedAt: item.publishedAt || null,
+    rewardAmount: item.rewardAmount,
+    potUsd: item.potUsd,
+    entryFeeUsd: item.entryFeeUsd,
+    submissionCount: item.submissionCount || 0,
+    harnessKind: item.harnessKind || "",
+    status: item.status,
+    sponsorName: item.sponsor ? item.sponsor.name : "",
+    sponsorVerified: Boolean(item.sponsor && item.sponsor.isVerified),
+    skills: Array.isArray(item.skills) ? item.skills.slice(0, 6) : [],
+    blurb: clip(item.summary || item.description || "", 170),
   };
+}
 
-  /** Reads one page of the board: the first page, or the next one the cursor names. */
-  const load = async (mode) => {
-    if (view.loading) return;
-    const first = mode === 'first';
-    if (!first && view.cursor === null) return;
-    view.loading = true;
-    if (!first) paint();
-    const query = first
-      ? '/competitions?status=open&limit=12'
-      : `/competitions?status=open&limit=12&cursor=${encodeURIComponent(view.cursor)}`;
-    try {
-      const page = await api(query, { signal: ctx.signal, fresh: ctx.fresh && first });
-      const items = Array.isArray(page.items) ? page.items : [];
-      view.items = first ? items : view.items.concat(items.filter((item) => !view.items.some((known) => known.slug === item.slug)));
-      view.cursor = page.next_cursor ?? null;
-      view.fetchedAt = Date.now();
-      view.loading = false;
-      paint();
-      ctx.setTitle(`${view.items.filter(stillOpen).length} open bounties · make.fun board`);
-    } catch (error) {
-      view.loading = false;
-      throw error;
-    }
+function comparators(order, now) {
+  if (order === "pot") return (a, b) => (Number(b.potUsd) || 0) - (Number(a.potUsd) || 0);
+  if (order === "reward") return (a, b) => (Number(b.rewardAmount) || 0) - (Number(a.rewardAmount) || 0);
+  if (order === "entries") return (a, b) => (Number(b.submissionCount) || 0) - (Number(a.submissionCount) || 0);
+  if (order === "newest") return (a, b) => Date.parse(b.publishedAt || 0) - Date.parse(a.publishedAt || 0);
+  return (a, b) => {
+    const leftA = Date.parse(a.deadline) - now;
+    const leftB = Date.parse(b.deadline) - now;
+    const liveA = leftA > 0 ? leftA : Infinity;
+    const liveB = leftB > 0 ? leftB : Infinity;
+    if (liveA !== liveB) return liveA - liveB;
+    return (Number(b.potUsd) || 0) - (Number(a.potUsd) || 0);
   };
-
-  if (view.items.length > 0) paint();
-  await load('first');
 }

@@ -1,139 +1,163 @@
-// The shell and the router: four hash routes, each with its own URL, back button and deep link.
-//
-//   #/                          the board of open bounties
-//   #/bounty/<slug>             one bounty
-//   #/bounty/<slug>/leaderboard its leaderboard
-//   #/u/<handle>                a public profile
-//
-// A route's code is pulled in with its own literal import() the first time it is opened, so the first load carries
-// the board alone, and every later route is one conditional API read.
+// Router and shell. One static page holds the header, the crumbs, a single
+// view slot and the footer; only the view slot is ever replaced, and each
+// view repaints its own nodes when fresh data arrives.
 
-import { module_, netStats, onNet } from './lib/net.js';
-import { ago } from './lib/format.js';
-import { backToBoard, clear, el, failed, startClock, state } from './lib/ui.js';
+import { everySecond, el, fill, errorPanel, setText } from "./lib/dom.js";
+import { clockUTC } from "./lib/format.js";
 
-const VIEWS = {
-  board: () => import('./views/board.js'),
-  bounty: () => import('./views/bounty.js'),
-  leaderboard: () => import('./views/leaderboard.js'),
-  profile: () => import('./views/profile.js'),
+window.__shotReady = false;
+
+const SHELL = {
+  view: document.getElementById("view"),
+  live: document.getElementById("live"),
+  crumbs: document.getElementById("crumbs"),
+  clock: document.getElementById("clock"),
+  nav: Array.from(document.querySelectorAll("[data-nav]")),
 };
 
-const mount = document.getElementById('main');
-const netLabel = document.getElementById('net');
-const refreshButton = document.getElementById('refresh');
-const boardLink = document.querySelector('[data-nav="board"]');
+const ROUTES = [
+  { name: "board", pattern: /^\/?$/ },
+  { name: "leaderboard", pattern: /^\/bounty\/([^/]+)\/leaderboard\/?$/ },
+  { name: "bounty", pattern: /^\/bounty\/([^/]+)\/?$/ },
+  { name: "profile", pattern: /^\/u\/([^/]+)\/?$/ },
+];
 
-let shown = 0;
-let currentRoute = null;
+const LOADERS = {
+  board: () => import("./views/board.js"),
+  bounty: () => import("./views/bounty.js"),
+  leaderboard: () => import("./views/leaderboard.js"),
+  profile: () => import("./views/profile.js"),
+};
 
-/** The route a hash names. Anything unrecognized is a route of its own, so a bad link says so rather than guessing. */
-function parseRoute(hash) {
-  const parts = String(hash ?? '')
-    .replace(/^#/, '')
-    .split('/')
-    .filter((part) => part !== '')
-    .map((part) => {
-      try {
-        return decodeURIComponent(part);
-      } catch {
-        return part;
-      }
-    });
-
-  if (parts.length === 0) return { name: 'board', key: 'board' };
-  if (parts[0] === 'bounty' && parts.length === 2) return { name: 'bounty', key: `bounty/${parts[1]}`, slug: parts[1] };
-  if (parts[0] === 'bounty' && parts.length === 3 && parts[2] === 'leaderboard') {
-    return { name: 'leaderboard', key: `board/${parts[1]}`, slug: parts[1] };
-  }
-  if (parts[0] === 'u' && parts.length === 2) return { name: 'profile', key: `u/${parts[1]}`, handle: parts[1] };
-  return { name: 'notfound', key: `notfound/${parts.join('/')}` };
+function parseHash(hash) {
+  const raw = String(hash || "").replace(/^#/, "");
+  const cut = raw.indexOf("?");
+  const path = cut === -1 ? raw : raw.slice(0, cut);
+  const query = new URLSearchParams(cut === -1 ? "" : raw.slice(cut + 1));
+  return { path: path || "/", query };
 }
 
-function notFound(route) {
-  return state({
-    title: 'No such route',
-    body: `This app answers #/, #/bounty/<slug>, #/bounty/<slug>/leaderboard and #/u/<handle>. The link asked for “#/${route.key}”.`,
-    action: backToBoard(),
+function match(path) {
+  for (const route of ROUTES) {
+    const found = route.pattern.exec(path);
+    if (!found) continue;
+    const params = found.slice(1).map((value) => decodeURIComponent(value));
+    return { route: route.name, params };
+  }
+  return null;
+}
+
+let current = null;
+let generation = 0;
+
+function setLive(text) {
+  setText(SHELL.live, text);
+}
+
+function setCrumbs(items) {
+  if (!items || !items.length) {
+    SHELL.crumbs.replaceChildren();
+    return;
+  }
+  const nodes = [];
+  items.forEach((item, index) => {
+    if (index) nodes.push(el("span", { class: "sep", "aria-hidden": "true" }, "/"));
+    if (item.href) nodes.push(el("a", { href: item.href, text: item.label }));
+    else nodes.push(el("span", { text: item.label }));
   });
+  fill(SHELL.crumbs, nodes);
 }
 
-/** Runs one route: new document nodes, one abortable read set, and the screenshot hook around the data it shows. */
-async function show(route, options = {}) {
-  const run = ++shown;
-  const controller = new AbortController();
-  currentRoute = route;
-  window.__shotReady = false;
-
-  document.title = 'make.fun bounty board';
-  if (boardLink !== null) {
-    if (route.name === 'board') boardLink.setAttribute('aria-current', 'page');
-    else boardLink.removeAttribute('aria-current');
+function mark(route) {
+  for (const link of SHELL.nav) {
+    if (link.dataset.nav === route) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
   }
+}
 
-  const loader = VIEWS[route.name];
-  clear(mount);
-  if (loader === undefined) {
-    mount.append(notFound(route));
+function notFound(path) {
+  SHELL.view.replaceChildren(
+    el(
+      "div",
+      { class: "err" },
+      el("h1", { text: "No such view" }),
+      el("p", {}, "The route ", el("code", { text: path }), " is not one this client renders."),
+      el("p", { class: "note", text: "Try the board, a bounty page, its leaderboard, or a profile." })
+    ),
+    el("p", {}, el("a", { class: "btn primary", href: "#/", text: "Back to the board" }))
+  );
+  setCrumbs(null);
+  document.title = "Not found · make.fun board";
+}
+
+async function render(options = {}) {
+  const { path, query } = parseHash(location.hash);
+  const found = match(path);
+  const mine = ++generation;
+
+  window.__shotReady = false;
+  SHELL.view.setAttribute("aria-busy", "true");
+
+  if (current) {
+    try { current.destroy(); } catch { /* a dying view must not block the next */ }
+    current = null;
+  }
+  mark(found ? found.route : null);
+
+  if (!found) {
+    notFound(path);
+    SHELL.view.removeAttribute("aria-busy");
+    SHELL.view.focus({ preventScroll: true });
     window.__shotReady = true;
     return;
   }
 
-  const retry = () => void show(route, { fresh: true });
+  SHELL.view.replaceChildren(
+    el("div", { class: "boot" }, el("p", { class: "boot-line", text: "Loading…" }))
+  );
+
   const context = {
-    route,
-    mount,
-    signal: controller.signal,
-    fresh: options.fresh === true,
-    setTitle: (title) => {
-      if (run === shown) document.title = title;
+    params: found.params,
+    query,
+    route: found.route,
+    force: options.force === true,
+    live: setLive,
+    crumbs: setCrumbs,
+    title(title) {
+      document.title = title ? title + " · make.fun board" : "make.fun board";
+    },
+    ready() {
+      if (mine !== generation) return;
+      SHELL.view.removeAttribute("aria-busy");
+      window.__shotReady = true;
+    },
+    reload() {
+      render({ force: true });
     },
   };
 
   try {
-    const render = await module_(loader);
-    if (run !== shown) return;
-    await render(context);
+    const module = await LOADERS[found.route]();
+    if (mine !== generation) return;
+    current = (await module.default(SHELL.view, context)) || null;
   } catch (error) {
-    if (error?.name === 'AbortError' || run !== shown) return;
-    clear(mount);
-    mount.append(failed(error, retry));
-  } finally {
-    if (run === shown) {
-      window.__shotReady = true;
-      mount.dataset.route = route.name;
-    }
+    if (mine !== generation) return;
+    SHELL.view.replaceChildren(errorPanel(error, () => context.reload()));
+    SHELL.view.removeAttribute("aria-busy");
+    window.__shotReady = true;
+  }
+
+  if (mine === generation) {
+    SHELL.view.focus({ preventScroll: true });
+    window.scrollTo(0, 0);
   }
 }
 
-/** The header's own line: how many reads this session made and how many answers came back unchanged. */
-function paintNet(snapshot = null) {
-  const stats = netStats();
-  const reused = stats.hits + stats.revalidated;
-  const words = stats.requests === 0 ? 'no reads yet' : `${stats.requests} read${stats.requests === 1 ? '' : 's'} · ${reused} reused`;
-  const tail = snapshot !== null && snapshot.lastAt > 0 ? ` · ${ago(new Date(stats.lastAt).toISOString())}` : '';
-  netLabel.textContent = `${words}${tail}`;
-  netLabel.title = `${stats.requests} GETs to make.fun, ${stats.revalidated} answered 304, ${stats.hits} served from memory`;
-  netLabel.dataset.tone = snapshot !== null && snapshot.kind === 'revalidated' ? 'hit' : '';
-}
+window.addEventListener("hashchange", () => render());
+window.addEventListener("online", () => render({ force: true }));
 
-refreshButton.addEventListener('click', () => {
-  if (currentRoute === null) return;
-  refreshButton.disabled = true;
-  setTimeout(() => {
-    refreshButton.disabled = false;
-  }, 600);
-  void show(currentRoute, { fresh: true });
-});
+if (!location.hash) location.replace("#/");
 
-window.addEventListener('hashchange', () => {
-  const route = parseRoute(window.location.hash);
-  if (currentRoute !== null && route.key === currentRoute.key) return;
-  window.scrollTo({ top: 0, behavior: 'auto' });
-  void show(route);
-});
-
-onNet(paintNet);
-startClock();
-paintNet();
-void show(parseRoute(window.location.hash));
+everySecond(() => setText(SHELL.clock, clockUTC(Date.now())));
+setText(SHELL.clock, clockUTC(Date.now()));
+render();
