@@ -1,148 +1,142 @@
-<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>make.fun · board</title>
+<!doctype html>
+<html lang=en>
+<head>
+<meta charset=utf-8>
+<meta name=viewport content=width=device-width,initial-scale=1>
+<title>make.fun</title>
 <style>
-body{margin:0;height:100vh;display:grid;grid-template:46px 1fr/318px 1fr;overflow:hidden;background:#0a0c10;color:#e9eef4;font:14px/1.5 system-ui,sans-serif}
-a{color:inherit;text-decoration:none}[hidden]{display:none!important}
-header{grid-column:1/3;display:flex;justify-content:space-between;align-items:center;padding:0 12px;border-bottom:1px solid #20272f}
-#m{display:flex;gap:10px;font:10px monospace;color:#98a2af}
-#l{overflow-y:auto;overflow-x:hidden;border-right:1px solid #20272f}
-#f{display:block;width:calc(100% - 16px);margin:8px;padding:6px 7px;background:#05070a;border:1px solid #20272f;color:inherit}
-#r a{display:block;padding:9px 12px;border-bottom:1px solid #12171d}
-#r a:hover,#r a.o{background:#11161c}
-#r a>b{display:block;color:#e9eef4;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:58px}
-#r i{float:right;font:11px monospace;color:#98a2af;font-style:normal}
-#r small{display:block;font:10px monospace;color:#98a2af;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#v>a,p{font:11px/1.7 monospace;color:#98a2af}
-#r small b{margin-right:4px}
-b,p b{color:#c9ff45}
-#v{overflow-y:auto;padding:16px 22px 40px}
-#l,#v{scrollbar-width:thin;scrollbar-color:#2a333d #0a0c10}
-h1{font-size:19px;margin:6px 0}
-p{margin:0 0 8px}
-.bt{display:inline-block;margin:2px 0 10px;padding:6px 10px;background:#c9ff45;color:#000;font:700 12px system-ui}
-.vh,.vr{display:grid;grid-template-columns:46px 1fr 110px 86px;align-items:center;padding:0 26px;font:11px monospace}
-.vh{height:24px;font-size:9px;text-transform:uppercase;color:#98a2af;border-bottom:1px solid #20272f}
-.vh span:nth-child(n+3),.vr span:nth-child(n+3){text-align:right}
-.vs{height:calc(100vh - 158px);overflow:auto;max-width:820px}
-.vr{height:34px;border-bottom:1px solid #141a21}
-@media(max-width:700px){body{grid-template:46px 1fr/1fr}body.det #l{display:none}body:not(.det) #v{display:none}}
+body{margin:0;background:#101114;color:#e8eaed;font:13px monospace}
+a{color:inherit;text-decoration:none}
+header,main,aside,#rows,#view,.m,.srow{display:flex}
+header{align-items:center;justify-content:space-between;padding:5px 10px;background:#181a1e}
+#meter{color:#a8b1bd;font-size:10px}
+main{height:calc(100vh - 26px)}
+aside{flex:0 0 320px;flex-direction:column;border-right:1px solid #24272c}
+#rows,#view{flex:1;flex-direction:column;overflow:auto}
+#rows,#view,.v{scrollbar-width:thin;scrollbar-color:#2a2f36 transparent}
+::-webkit-scrollbar{width:8px}
+::-webkit-scrollbar-thumb{background:#2a2f36;border-radius:4px}
+::-webkit-scrollbar-track{background:transparent}
+#q{margin:6px;padding:5px 7px;border:0;background:#181a1e;color:#e8eaed;font:inherit}
+.s,.m,.srow{color:#b6bdc8;font-size:11px}
+.row{padding:6px 10px;border-bottom:1px solid #24272c}
+.row.on{background:rgba(255,255,255,.12);border-left:2px solid #5e8;padding-left:8px}
+.row.on b{font-weight:600;color:#fff}
+.m{gap:6px;white-space:nowrap}
+.m span+span:before{content:"· ";color:#8a929e}
+.row b{display:block}
+h1{font-size:13px;margin:0}
+h2{margin:0 0 6px}
+.w,.cd,.back,summary,.srow a{color:#5e8}
+.srow{gap:8px;height:28px;padding:3px 10px;border-bottom:1px solid #24272c}
+.srow a{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.v{height:60vh;overflow:auto}
+p{margin:0 0 8px;line-height:1.4}
+h3,h4{margin:12px 0 4px}
+h4{font-size:12px}
+ul{list-style:none;padding-left:11px}
+li:before{content:"· "}
+code{background:#1d2229}
+@media(max-width:700px){main{flex-direction:column;height:auto}aside{flex:0 0 auto;max-height:56vh;border:0}body.det aside{display:none}.back{display:inline-block}}
 </style>
-</head><body>
-<header><a href="#/">make<i>.</i>fun</a><div id=m><span>req <b id=q1>0</b></span><span>304 <b id=q2>0</b></span><span>cache <b id=q3>0</b></span></div></header>
-<aside id=l><input id=f placeholder="Filter title or slug"><div id=r></div></aside>
-<section id=v></section>
+</head>
+<body>
+<header>
+<h1>make.fun</h1>
+<span id=meter></span>
+</header>
+<main>
+<aside>
+<input id="q" placeholder=filter...>
+<div id="rows"></div>
+</aside>
+<section id="view"></section>
+</main>
 <script>
-const A='https://make.fun/api',M=new Map(),S={q:0,a:0,c:0},D=document,$=s=>D.querySelector(s),en=encodeURIComponent;
-const h=s=>(s==null?'':''+s).replace(/</g,'&lt;');
-const cd=d=>{const s=(Date.parse(d)-Date.now())/1e3|0,p=n=>('0'+n).slice(-2);return s<1?'closed':(s>86400?(s/86400|0)+'d ':'')+p(s%86400/3600|0)+':'+p(s%3600/60|0)+':'+p(s%60)};
-const N0=20;
-let B=[],cur='',R=new Map(),K=[],CD=[];
-const cnt=()=>{$('#q1').textContent=S.q;$('#q2').textContent=S.a;$('#q3').textContent=S.c};
-
-async function get(p){
-const u=A+p,c=M.get(u),n=Date.now();
-if(c&&n-c.t<8e3){S.c++;cnt();return c.b}
-const k={Accept:'application/json'};
-if(c&&c.e)k['If-None-Match']=c.e;
-if(c&&c.l)k['If-Modified-Since']=c.l;
-S.q++;cnt();
-const r=await fetch(u,{headers:k});
-if(r.status==304&&c){S.a++;c.t=n;cnt();return c.b}
+const $=s=>document.querySelector(s),V=$('#view'),R=$('#rows'),Q=$('#q'),M=$('#meter'),A='https://make.fun/api/';
+const F=15e3,NP=20,K=new Map(),N={r:0,c:0},S={n:new Map(),ls:0,k:0,g:0,a:''};
+const BK='<a class=back href="#/">← board</a>';
+const X=s=>(s==null?'':''+s).replace(/[&<]/g,c=>'&#'+c.charCodeAt(0)+';');
+const U=v=>v?'$'+v:'—';
+const WR=x=>x.values?.judge!=null?(x.values.judge/1e4).toFixed(2)+'%':'—';
+const LT=t=>{const n=(Date.parse(t)-Date.now())/1e3|0;if(n<1)return'closed';const d=n/86400|0,h=n%86400/3600|0,m=n%3600/60|0;return d?d+'d '+h+'h':h+'h '+('0'+m).slice(-2)+'m '+('0'+n%60).slice(-2)+'s'};
+const CD=t=>'<span class=cd data-t="'+t+'">'+LT(t)+'</span>';
+const J=a=>a.filter(Boolean).join(' · ');
+const PN=()=>M.textContent=N.r+' req · '+N.c+' cached';
+// Markdown: X() escapes the API text first, so the tags below are all the markup.
+const Z=(k,s)=>'<'+k+'>'+s+'</'+k+'>';
+const MD=t=>X(t||'')
+.replace(/^[ \t]*(#{1,6})\s+(.*)$/gm,(a,h,x)=>Z('h'+(h<'###'?3:4),x))
+.replace(/(?:^[ \t]*[-*]\s+.*\n?)+/gm,u=>Z('ul',u.trim().split('\n').map(l=>Z('li',l.trim().slice(2))).join('')))
+.replace(/^(?!<)(.+)$/gm,(a,x)=>Z('p',x)).replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>').replace(/`([^`]+)`/g,'<code>$1</code>');
+async function F1(p){
+const u=A+p,h=K.get(u),n=Date.now();
+if(h&&n-h.t<F){N.c++;PN();return[h.body,h.src]}
+N.r++;PN();const r=await fetch(u,{headers:{Accept:'application/json'},cache:'no-cache'});
 if(!r.ok)throw Error(r.status);
-const b=await r.json();
-M.set(u,{e:r.headers.get('ETag'),l:r.headers.get('Last-Modified'),b,t:n});
-return b
-}
+const b=await r.json();K.set(u,{body:b,t:n,src:n});PN();return[b,n]}
+function MT(k,g,h){if(S.k==k&&S.g==g)return;S.k=k;S.g=g;V.innerHTML=h;V.scrollTop=0}
+const MK=()=>{const r=document.createElement('a');r.className='row';r.innerHTML='<b></b><div class=m><span class=w></span><span></span><span class=cd></span></div>';return r};
+const HL=()=>{for(const[k,r]of S.n)r.classList.toggle('on',k==S.a)};
+const ORD=t=>{const n=Date.now(),f=x=>(x=Date.parse(x.deadline))>n?x:1e16-x;return t.slice().sort((a,b)=>f(a)-f(b))};
+function PR(r,x){const m=r.children[1],c=m.children[2];
+r.children[0].textContent=x.title;m.children[0].textContent=U(x.rewardAmount);
+m.children[1].textContent='pot '+U(x.potUsd)+' · '+x.submissionCount+' entries';
+c.dataset.t=x.deadline;c.textContent=LT(x.deadline);r.href='#/bounty/'+x.slug}
+function FT(){const q=Q.value.trim().toLowerCase();for(const r of R.children)r.hidden=!!q&&!r.textContent.toLowerCase().includes(q)}
+function FL(d){const t=ORD(d.items||[]),s=new Set();for(const x of t){s.add(x.slug);let r=S.n.get(x.slug);if(!r){r=MK();S.n.set(x.slug,r)}R.append(r);PR(r,x)}for(const[k,r]of S.n)if(!s.has(k)){r.remove();S.n.delete(k)}HL()}
+async function SY(){const[l,s]=await F1('competitions');if(S.ls!==s){FL(l);S.ls=s}return l}
 
-function paint(){
-const H=$('#r'),f=$('#f').value.trim().toLowerCase(),n=Date.now();
-K=[];
-for(const i of B){
-let r=R.get(i.slug);
-if(!r){
-const a=D.createElement('a');
-a.href='#/bounty/'+i.slug;
-a.innerHTML='<i></i><b></b><small><b></b><span></span></small>';
-R.set(i.slug,r={a,n:a.children[1],t:a.children[0],s:a.children[2].children})
-}
-r.a.dataset.l=Date.parse(i.deadline)>n?1:0;
-r.n.textContent=i.title||i.slug;
-r.t.textContent=cd(i.deadline);
-r.s[0].textContent='$'+i.rewardAmount;
-r.s[1].textContent='pot $'+(+(i.potUsd??i.rewardAmount))+(i.entryFeeUsd?' · fee $'+i.entryFeeUsd:' · free')+' · '+(i.submissionCount||0)+' in';
-r.d=i.deadline;H.append(r.a);K.push(r);
-r.a.hidden=!!f&&!(i.slug+' '+i.title).toLowerCase().includes(f)
-}
-}
+async function BD(){
+const d=await SY(),t=d.items||[],o=t.filter(x=>Date.parse(x.deadline)>Date.now()).sort((a,b)=>a.deadline.localeCompare(b.deadline));
+MT('',S.ls,'<h2>Board · '+o.length+' of '+t.length+' open</h2>'+
+o.slice(0,12).map(x=>'<div class=srow><a href="#/bounty/'+x.slug+'">'+X(x.title)+'</a>'+U(x.rewardAmount)+' · pot '+U(x.potUsd)+' · '+(x.entryFeeUsd?'fee '+U(x.entryFeeUsd):'free')+' · '+x.submissionCount+' entries</div>').join(''))}
 
-function vlist(d){
-const a=d.entries||[],N=20,H=34;
-const b=D.createElement('div');
-b.innerHTML='<div class=vh><span>#</span><span>handle</span><span>win rate</span><span>size</span></div><div class=vs><i></i>'+'<div class=vr><span></span><a></a><span></span><span></span></div>'.repeat(N)+'<i></i></div>';
-const sc=b.lastChild,RS=[...sc.querySelectorAll('.vr')];
-const draw=()=>{
-const t=Math.min(a.length-N,Math.max(0,sc.scrollTop/H|0));
-sc.firstChild.style.height=t*H+'px';
-sc.lastChild.style.height=Math.max(0,a.length-N-t)*H+'px';
-RS.forEach((r,i)=>{const v=a[t+i],c=r.children,q=v.display||{};
-r.hidden=!v;
-if(!v)return;
-c[0].textContent=v.rank||t+i+1;
-c[1].textContent=v.handle;c[1].href='#/u/'+en(v.handle||'');
-c[2].textContent=v.values.judge!=null?(v.values.judge/1e4).toFixed(1)+'%':(q[Object.keys(q)[0]]||'—');
-c[3].textContent=v.values.bytes!=null?(v.values.bytes>>10)+' KB':(q.size||'—')
-})};
-sc.onscroll=draw;draw();
-return b
-}
+async function DT(q){
+const[d,s]=await F1('competitions/'+q);await SY();
+MT('b/'+q,s+':'+S.ls,BK+'<h2>'+X(d.title)+'</h2><p class=s>'+J(['reward '+U(d.rewardAmount),'pot '+U(d.potUsd),d.entryFeeUsd?'fee '+U(d.entryFeeUsd):'free',d.submissionCount+' entries',Date.parse(d.deadline)>Date.now()?'open':'closed',d.publishedAt.slice(5,10)+' → '+d.deadline.slice(5,10)])+'</p>'+
+((d.rewardsNow||[]).length?'<p class=s>'+J(d.rewardsNow.slice(0,5).map(r=>'#'+r.place+' '+U(r.amountUsd)))+'</p>':'')+
+(d.summary?'<p class=s>'+X(d.summary)+'</p>':'')+
+'<p class=s>closes in '+CD(d.deadline)+' <a href="#/bounty/'+q+'/leaderboard">leaderboard →</a></p>'+
+MD(d.description)+'<details><summary>rules</summary>'+MD(d.rules||'')+'</details>')}
 
-async function draw(){
-const p=location.hash.replace(/^#\/?/,'').split('/'),a=p[0],b=decodeURIComponent(p[1]||'');
-cur=!a?'board':a==='bounty'&&b?(p[2]==='leaderboard'?'lb':'bn'):a==='u'&&b?'pf':'404';
-D.body.classList.toggle('det',cur!=='board');
-for(const[k,r]of R)r.a.classList.toggle('o',k===b);
+async function LB(q){
+const[d,s]=await F1('competitions/'+q+'/leaderboard');await SY();
+const e=d.entries||[],n=e.length,w=Math.min(NP,n);
+MT('l/'+q,s+':'+q+':'+S.ls,'<a class=back href="#/bounty/'+q+'">← bounty</a><h2>'+X(d.title||'Leaderboard')+'</h2><p class=s>'+n+' entries · '+w+' rows in the DOM · spacers</p>'+
+'<div class=v></div>');
+const sc=V.querySelector('.v');
+sc.innerHTML='<div></div><div></div><div></div>';
+const sa=sc.children[0],bl=sc.children[1],sd=sc.children[2];
+bl.innerHTML='<div class=srow><span></span><a></a><span></span></div>'.repeat(w);
+const dr=()=>{const s0=Math.max(0,Math.min(sc.scrollTop/28|0,n-w));
+sa.style.height=s0*28+'px';sd.style.height=(n-s0-w)*28+'px';
+for(let j=0;j<w;j++){const i=s0+j,x=e[i],r=bl.children[j],z=r.children;
+if(r.dataset.i==''+i)continue;r.dataset.i=i;
+z[0].textContent='#'+x.rank;z[1].textContent='@'+x.handle;z[1].href='#/u/'+x.handle;z[2].textContent=WR(x)}};
+sc.onscroll=()=>requestAnimationFrame(dr);dr()}
+
+async function PF(h){
+const l=await SY(),bs=new Set();let c=0,nw=null,rk=null,tt=0;
+for(const x of l.items||[])for(const y of x.submissions||[])if(y.hunter==h){c++;bs.add(x.slug);if(!nw||y.createdAt>nw[1].createdAt)nw=[x,y]}
+for(const[u,v]of K){if(!u.endsWith('/leaderboard'))continue;const z=(v.body.entries||[]).find(z=>z.handle==h);if(z){rk=z;tt=v.body.entries.length;break}}
+MT('u/'+h,S.ls+':'+h+':'+(rk?rk.rank:'-'),BK+'<h2>@'+X(h)+'</h2><p class=s>'+
+J([c+' entries',bs.size+' bounties',nw&&X(nw[0].title)+' '+X(nw[1].status||'')+' '+nw[1].createdAt.slice(5,16).replace('T',' '),rk&&'rank #'+rk.rank+' of '+tt,rk&&WR(rk)+' win rate',rk&&rk.judge&&rk.judge.wins+'W '+rk.judge.losses+'L '+rk.judge.draws+'D'])+'</p>')}
+
+function MS(h,m){MT(h,'x',BK+'<h2>'+h+'</h2><p class=s>'+m+'</p>')}
+
+async function RT(){
+const raw=decodeURIComponent(location.hash.replace(/^#\/?/,'')),p=raw.split('/');
+document.body.classList.toggle('det',raw!='');
+S.a=p[0]=='bounty'?p[1]||'':'';HL();
 window.__shotReady=false;
-let t='Not found',s='no route at '+h(location.hash||'#/')+' · try #/ or #/u/&lt;handle&gt;',f='',x='',v,dl,bh;
 try{
-if(cur==='board'){
-t='Bounty board';s=B.length+' bounties · '+B.filter(i=>Date.parse(i.deadline)>Date.now()).length+' open · pick one on the left';
-const sum=k=>B.reduce((q,i)=>q+(+i[k]||0),0);f='pot <b>$'+sum('potUsd').toLocaleString()+'</b> · entries <b>'+sum('submissionCount').toLocaleString()+'</b>'
-}else if(cur==='bn'){
-const d=await get('/competitions/'+en(b));
-t=h(d.title||b);s=h('ends '+String(d.deadline||'').slice(0,10)+(Date.parse(d.deadline)>Date.now()?' · open':' · closed'));
-f='reward <b>$'+d.rewardAmount+'</b> · pot <b>$'+d.potUsd+'</b> · fee <b>'+(d.entryFeeUsd?'$'+d.entryFeeUsd:'free')+'</b> · entries <b>'+d.submissionCount+'</b> · ends in <b id=cd>'+cd(d.deadline)+'</b>';
-x='<a class=bt href="#/bounty/'+en(b)+'/leaderboard">Leaderboard →</a><p>'+h(d.summary)+'</p>';dl=d.deadline
-}else if(cur==='lb'){
-const d=await get('/competitions/'+en(b)+'/leaderboard'),a0=d.entries||[];
-t='Leaderboard';s=h((d.competition||{}).title||b)+' · '+(d.entries||[]).length+' entries · '+(d.phase||{}).title+' · '+N0+' rows mounted';bh='#/bounty/'+en(b);v=vlist(d);x='<div id=t></div><p>'+a0.length+' entries · '+N0+' rows in the DOM · scroll to move the window</p>'
-}else if(cur==='pf'){
-const d=await get('/profiles/'+en(b)).catch(()=>({})),c=d.record||{},e=d.solutions||[];
-t=h(d.handle||b);s=h(d.bio||'public make.fun profile');
-f='bounties <b>'+(c.competitions_entered??'—')+'</b> · wins <b>'+(c.competitions_won??'—')+'</b>';
-x='<p>'+e.slice(0,6).map(y=>'<a href="#/bounty/'+en((y.competition||{}).slug||'')+'">'+h((y.competition||{}).title)+'</a>').join('<br>')+'</p>'
-}
-}catch(err){t='Could not load';s=h(err.message||'request failed')}
-const cv=$('#v');
-cv.innerHTML='<a href="'+(bh||'#/')+'">'+(bh?'← bounty':'← all bounties')+'</a><h1>'+t+'</h1><p>'+s+'</p>'+(f?'<p>'+f+'</p>':'')+x;
-cv.scrollTop=0;
-if(v)$('#t').append(v);
-if(dl)CD=[$('#cd'),dl];
-window.__shotReady=true
-}
-
-async function load(){
-try{
-const j=await get('/competitions');
-const n=Date.now();
-B=(j.items||[]).filter(x=>x&&x.slug).sort((x,y)=>(Date.parse(y.deadline)>n)-(Date.parse(x.deadline)>n)||Date.parse(x.deadline)-Date.parse(y.deadline));
-paint();
-if(cur==='board')draw()
-}catch(x){$('#f').placeholder='board failed: '+x.message}
-}
-
-$('#f').oninput=paint;
-onhashchange=draw;
-setInterval(()=>{for(const r of K)r.t.textContent=cd(r.d);if(CD[0])CD[0].textContent=cd(CD[1])},1e3);
-setInterval(load,45e3);
-cnt();draw();load();
+await (!raw?BD():p[0]=='bounty'&&p[1]&&p[2]=='leaderboard'?LB(p[1]):p[0]=='bounty'&&p[1]&&p.length==2?DT(p[1]):p[0]=='u'&&p[1]&&p.length==2?PF(p[1]):MS('Not found','"#/'+X(raw)+'" is no route: nothing fetched'))}catch(e){MS('Request failed',X(e&&e.message||e)+' — retry later')}
+window.__shotReady=true}
+setInterval(()=>{for(const e of document.querySelectorAll('[data-t]'))e.textContent=LT(e.dataset.t)},1e3);
+Q.addEventListener('input',FT);
+addEventListener('hashchange',RT);
+RT();
 </script>
-</body></html>
+</body>
+</html>
